@@ -3,345 +3,377 @@ const { createApp } = Vue;
 createApp({
   data() {
     return {
+      // Auth state
       user: null,
-      dashboard: {},
-      adminPendingUsers: [],
-      adminPendingDrives: [],
-      adminApplications: [],
-      companyApplications: [],
-      companyInterviewForms: {},
-      companyProfile: { name: '', hr_contact: '', website: '', industry: '' },
-      studentProfile: { name: '', department: '', branch: '', phone: '', cgpa: '', graduation_year: '' },
-      driveForm: {
-        title: '',
-        description: '',
-        eligibility: '',
-        eligibility_branch: '',
-        eligibility_cgpa_min: '',
-        eligibility_year: '',
-        job_location: '',
-        ctc: '',
-        application_deadline: ''
-      },
+      currentPage: 'dashboard',
+      authTab: 'login',
       message: '',
       error: '',
+
+      // Login form
       loginForm: { email: '', password: '' },
-      studentForm: {
-        name: '',
-        department: '',
-        branch: '',
-        email: '',
-        password: '',
-        cgpa: '',
-        graduation_year: ''
-      },
-      companyForm: {
-        name: '',
-        hr_contact: '',
-        website: '',
-        industry: '',
-        email: '',
-        password: ''
-      }
+
+      // Registration forms
+      studentRegForm: { name: '', department: '', branch: '', email: '', password: '', cgpa: '', graduation_year: '', phone: '' },
+      companyRegForm: { name: '', hr_contact: '', website: '', industry: '', email: '', password: '' },
+
+      // Admin data
+      adminStats: {},
+      allUsers: [],
+      userSearch: '',
+      userRoleFilter: '',
+      adminDrives: [],
+      driveApprovalFilter: '',
+      adminApplications: [],
+      appStatusFilter: '',
+
+      // Company data
+      companyProfile: { name: '', hr_contact: '', website: '', industry: '' },
+      driveForm: { title: '', description: '', eligibility: '', eligibility_branch: '', eligibility_cgpa_min: '', eligibility_year: '', job_location: '', ctc: '', application_deadline: '' },
+      companyDrives: [],
+      companyApplications: [],
+      interviewForms: {},
+
+      // Student data
+      studentProfile: { name: '', department: '', branch: '', phone: '', cgpa: '', graduation_year: '' },
+      openDrives: [],
+      driveSearch: '',
+      studentApplications: [],
     };
   },
   mounted() {
-    this.bootstrap();
+    this.checkLogin();
   },
   methods: {
+
+    // ==================== Helpers ====================
+
     async api(path, options = {}) {
-      const fetchOptions = { credentials: 'include', ...options };
-      if (fetchOptions.body && !(fetchOptions.body instanceof FormData)) {
-        fetchOptions.headers = { 'Content-Type': 'application/json', ...(fetchOptions.headers || {}) };
+      const opts = { credentials: 'include', ...options };
+      if (opts.body && !(opts.body instanceof FormData)) {
+        opts.headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
       }
-      const response = await fetch(path, fetchOptions);
-      return response.json();
+      const res = await fetch(path, opts);
+      return res.json();
     },
-    async bootstrap() {
+
+    clear() {
+      this.message = '';
+      this.error = '';
+    },
+
+    formatDate(iso) {
+      if (!iso) return '-';
+      return new Date(iso).toLocaleDateString();
+    },
+
+    statusBadge(status) {
+      const map = {
+        Applied: 'badge bg-primary',
+        Shortlisted: 'badge bg-warning text-dark',
+        Selected: 'badge bg-success',
+        Rejected: 'badge bg-danger',
+        Pending: 'badge bg-secondary',
+        Open: 'badge bg-success',
+        Closed: 'badge bg-danger',
+        Approved: 'badge bg-success',
+      };
+      return map[status] || 'badge bg-secondary';
+    },
+
+    goTo(page) {
+      this.clear();
+      this.currentPage = page;
+      this.loadPage(page);
+    },
+
+    async loadPage(page) {
+      if (!this.user) return;
+      const role = this.user.role;
+      if (role === 'admin') {
+        if (page === 'dashboard') await this.loadAdminDashboard();
+        if (page === 'users') await this.loadAllUsers();
+        if (page === 'drives') await this.loadAdminDrives();
+        if (page === 'applications') await this.loadAdminApplications();
+      } else if (role === 'company') {
+        if (page === 'dashboard') await this.loadCompanyDashboard();
+        if (page === 'drives') await this.loadCompanyDrives();
+        if (page === 'applications') await this.loadCompanyApplications();
+      } else if (role === 'student') {
+        if (page === 'dashboard') await this.loadStudentDashboard();
+        if (page === 'drives') await this.loadOpenDrives();
+        if (page === 'applications') await this.loadStudentApplications();
+      }
+    },
+
+    // ==================== Auth ====================
+
+    async checkLogin() {
       try {
-        const result = await this.api('/api/me');
-        if (result.ok) {
-          this.user = result.data.user;
-          await this.loadRoleData();
+        const res = await this.api('/api/me');
+        if (res.ok) {
+          this.user = res.data.user;
+          this.currentPage = 'dashboard';
+          await this.loadPage('dashboard');
         }
-      } catch (error) {
-        this.error = 'Could not load app state.';
+      } catch (e) {
+        // Not logged in, show login page
       }
     },
+
     async login() {
       this.clear();
-      const result = await this.api('/api/auth/login', {
-        method: 'POST',
-        body: JSON.stringify(this.loginForm)
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.user = result.data.user;
-      this.message = result.message;
-      await this.loadRoleData();
+      const res = await this.api('/api/auth/login', { method: 'POST', body: JSON.stringify(this.loginForm) });
+      if (!res.ok) { this.error = res.error; return; }
+      this.user = res.data.user;
+      this.message = res.message;
+      this.currentPage = 'dashboard';
+      await this.loadPage('dashboard');
     },
+
     async logout() {
-      this.clear();
       await this.api('/api/auth/logout', { method: 'POST' });
       this.user = null;
-      this.dashboard = {};
-      this.adminPendingUsers = [];
-      this.adminPendingDrives = [];
+      this.currentPage = 'dashboard';
+      this.adminStats = {};
+      this.allUsers = [];
+      this.adminDrives = [];
       this.adminApplications = [];
+      this.companyDrives = [];
       this.companyApplications = [];
-      this.companyInterviewForms = {};
-      this.message = 'Logged out.';
+      this.interviewForms = {};
+      this.openDrives = [];
+      this.studentApplications = [];
+      this.message = 'Logged out successfully.';
     },
+
     async registerStudent() {
       this.clear();
-      const result = await this.api('/api/auth/register/student', {
-        method: 'POST',
-        body: JSON.stringify(this.studentForm)
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
+      const res = await this.api('/api/auth/register/student', { method: 'POST', body: JSON.stringify(this.studentRegForm) });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
     },
+
     async registerCompany() {
       this.clear();
-      const result = await this.api('/api/auth/register/company', {
-        method: 'POST',
-        body: JSON.stringify(this.companyForm)
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
+      const res = await this.api('/api/auth/register/company', { method: 'POST', body: JSON.stringify(this.companyRegForm) });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
     },
-    async loadRoleData() {
-      if (!this.user) return;
-      const result = await this.api('/api/dashboard');
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.dashboard = result.data;
 
-      if (this.user.role === 'admin') {
-        await this.loadAdminData();
-      }
+    // ==================== Admin ====================
 
-      if (this.user.role === 'company') {
-        await this.loadCompanyData();
-      }
-
-      if (this.user.role === 'student') {
-        await this.loadStudentData();
-      }
+    async loadAdminDashboard() {
+      const res = await this.api('/api/admin/summary');
+      if (res.ok) this.adminStats = res.data.stats;
     },
-    async loadAdminData() {
-      const [summary, pendingUsers, pendingDrives, applications] = await Promise.all([
-        this.api('/api/admin/summary'),
-        this.api('/api/admin/users/pending'),
-        this.api('/api/admin/drives'),
-        this.api('/api/admin/applications')
-      ]);
 
-      if (summary.ok) this.dashboard.stats = summary.data.stats;
-      if (pendingUsers.ok) this.adminPendingUsers = pendingUsers.data.users.filter((user) => !user.approved && user.is_active);
-      if (pendingDrives.ok) this.adminPendingDrives = pendingDrives.data.drives.filter((drive) => drive.approval_status === 'Pending');
-      if (applications.ok) this.adminApplications = applications.data.applications;
+    async loadAllUsers() {
+      let url = '/api/admin/users/all?';
+      if (this.userRoleFilter) url += 'role=' + this.userRoleFilter + '&';
+      if (this.userSearch) url += 'q=' + encodeURIComponent(this.userSearch);
+      const res = await this.api(url);
+      if (res.ok) this.allUsers = res.data.users;
     },
-    async loadCompanyData() {
-      const profile = await this.api('/api/company/me/profile');
 
-      if (profile.ok) this.companyProfile = profile.data.company;
-      if (this.dashboard.company) this.companyProfile = this.dashboard.company;
-
-      if (!this.dashboard.drives.length) {
-        this.companyApplications = [];
-        return;
-      }
-
-      const applicationResults = await Promise.all(
-        this.dashboard.drives.map((drive) => this.api(`/api/company/drives/${drive.id}/applications`))
-      );
-      this.companyApplications = applicationResults
-        .filter((result) => result.ok && result.data && result.data.applications)
-        .flatMap((result) => result.data.applications);
-      this.companyApplications.forEach((application) => {
-        if (!this.companyInterviewForms[application.id]) {
-          this.companyInterviewForms[application.id] = {
-            interview_at: '',
-            interview_mode: '',
-            interview_location: ''
-          };
-        }
-      });
+    async searchUsers() {
+      await this.loadAllUsers();
     },
-    async loadStudentData() {
-      const [profile, applications] = await Promise.all([
-        this.api('/api/student/me/profile'),
-        this.api('/api/student/me/applications')
-      ]);
 
-      if (profile.ok) this.studentProfile = profile.data.student;
-      if (applications.ok) this.dashboard.applications = applications.data.applications;
-    },
-    async applyDrive(driveId) {
+    async approveUser(id) {
       this.clear();
-      const result = await this.api(`/api/drives/${driveId}/apply`, { method: 'POST' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
-      await this.loadRoleData();
+      const res = await this.api('/api/admin/users/' + id + '/approve', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = 'User approved.';
+      await this.loadAllUsers();
+      await this.loadAdminDashboard();
     },
-    async createDrive() {
+
+    async deactivateUser(id) {
       this.clear();
-      const result = await this.api('/api/company/drives', {
-        method: 'POST',
-        body: JSON.stringify(this.driveForm)
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
-      await this.loadRoleData();
+      const res = await this.api('/api/admin/users/' + id + '/deactivate', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = 'User deactivated.';
+      await this.loadAllUsers();
     },
-    async closeDrive(driveId) {
+
+    async reactivateUser(id) {
       this.clear();
-      const result = await this.api(`/api/company/drives/${driveId}/close`, { method: 'POST' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
-      await this.loadRoleData();
+      const res = await this.api('/api/admin/users/' + id + '/reactivate', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = 'User reactivated.';
+      await this.loadAllUsers();
     },
-    async deleteDrive(driveId) {
+
+    async loadAdminDrives() {
+      let url = '/api/admin/drives?';
+      if (this.driveApprovalFilter) url += 'approval=' + this.driveApprovalFilter;
+      const res = await this.api(url);
+      if (res.ok) this.adminDrives = res.data.drives;
+    },
+
+    async approveDrive(id) {
       this.clear();
-      const result = await this.api(`/api/company/drives/${driveId}`, { method: 'DELETE' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
-      await this.loadRoleData();
+      const res = await this.api('/api/admin/drives/' + id + '/approve', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = 'Drive approved.';
+      await this.loadAdminDrives();
     },
-    async loadCompanyApplications() {
-      await this.loadCompanyData();
+
+    async rejectDrive(id) {
+      this.clear();
+      const res = await this.api('/api/admin/drives/' + id + '/reject', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = 'Drive rejected.';
+      await this.loadAdminDrives();
     },
+
+    async loadAdminApplications() {
+      let url = '/api/admin/applications?';
+      if (this.appStatusFilter) url += 'status=' + this.appStatusFilter;
+      const res = await this.api(url);
+      if (res.ok) this.adminApplications = res.data.applications;
+    },
+
+    // ==================== Company ====================
+
+    async loadCompanyDashboard() {
+      const res = await this.api('/api/dashboard');
+      if (!res.ok) return;
+      if (res.data.company) this.companyProfile = { ...res.data.company };
+      this.companyDrives = res.data.drives || [];
+    },
+
     async updateCompanyProfile() {
       this.clear();
-      const result = await this.api('/api/company/me/profile', {
-        method: 'PUT',
-        body: JSON.stringify(this.companyProfile)
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = 'Company profile updated.';
-      await this.loadRoleData();
+      const res = await this.api('/api/company/me/profile', { method: 'PUT', body: JSON.stringify(this.companyProfile) });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = 'Profile updated.';
     },
-    async updateApplicationStatus(applicationId, status) {
+
+    async loadCompanyDrives() {
+      const res = await this.api('/api/dashboard');
+      if (res.ok) this.companyDrives = res.data.drives || [];
+    },
+
+    async createDrive() {
       this.clear();
-      const result = await this.api(`/api/applications/${applicationId}/status`, {
-        method: 'POST',
-        body: JSON.stringify({ status })
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
-      await this.loadRoleData();
+      const res = await this.api('/api/company/drives', { method: 'POST', body: JSON.stringify(this.driveForm) });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
+      this.driveForm = { title: '', description: '', eligibility: '', eligibility_branch: '', eligibility_cgpa_min: '', eligibility_year: '', job_location: '', ctc: '', application_deadline: '' };
+      await this.loadCompanyDrives();
     },
-    async scheduleInterview(applicationId) {
+
+    async closeDrive(id) {
       this.clear();
-      const form = this.companyInterviewForms[applicationId] || {};
-      const result = await this.api(`/api/applications/${applicationId}/interview`, {
-        method: 'POST',
-        body: JSON.stringify(form)
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = result.message;
-      await this.loadRoleData();
+      const res = await this.api('/api/company/drives/' + id + '/close', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
+      await this.loadCompanyDrives();
     },
+
+    async deleteDrive(id) {
+      this.clear();
+      const res = await this.api('/api/company/drives/' + id, { method: 'DELETE' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
+      await this.loadCompanyDrives();
+    },
+
+    async loadCompanyApplications() {
+      // Load drives first if needed
+      if (!this.companyDrives.length) {
+        const r = await this.api('/api/dashboard');
+        if (r.ok) this.companyDrives = r.data.drives || [];
+      }
+      // Fetch applications for each drive
+      const results = await Promise.all(
+        this.companyDrives.map(d => this.api('/api/company/drives/' + d.id + '/applications'))
+      );
+      const allApps = results
+        .filter(r => r.ok && r.data && r.data.applications)
+        .flatMap(r => r.data.applications);
+      // Initialize interview forms (replace entire object for reactivity)
+      const newForms = {};
+      allApps.forEach(a => {
+        newForms[a.id] = this.interviewForms[a.id] || { interview_at: '', interview_mode: '', interview_location: '' };
+      });
+      this.interviewForms = newForms;
+      this.companyApplications = allApps;
+    },
+
+    async updateApplicationStatus(id, status) {
+      this.clear();
+      const res = await this.api('/api/applications/' + id + '/status', { method: 'POST', body: JSON.stringify({ status }) });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
+      await this.loadCompanyApplications();
+    },
+
+    async scheduleInterview(id) {
+      this.clear();
+      const form = this.interviewForms[id] || {};
+      const res = await this.api('/api/applications/' + id + '/interview', { method: 'POST', body: JSON.stringify(form) });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
+      await this.loadCompanyApplications();
+    },
+
+    // ==================== Student ====================
+
+    async loadStudentDashboard() {
+      const res = await this.api('/api/student/me/profile');
+      if (res.ok) this.studentProfile = { ...res.data.student };
+    },
+
     async updateStudentProfile() {
       this.clear();
       const formData = new FormData();
-      Object.entries(this.studentProfile).forEach(([key, value]) => formData.append(key, value ?? ''));
+      Object.entries(this.studentProfile).forEach(([k, v]) => formData.append(k, v ?? ''));
       const fileInput = this.$refs.resumeFile;
       if (fileInput && fileInput.files && fileInput.files[0]) {
         formData.append('resume_file', fileInput.files[0]);
       }
+      const res = await this.api('/api/student/me/profile', { method: 'PUT', body: formData });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = 'Profile updated successfully.';
+      this.studentProfile = { ...res.data.student };
+    },
 
-      const result = await this.api('/api/student/me/profile', {
-        method: 'PUT',
-        body: formData
-      });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = 'Student profile updated.';
-      await this.loadRoleData();
+    async loadOpenDrives() {
+      let url = '/api/drives?';
+      if (this.driveSearch) url += 'q=' + encodeURIComponent(this.driveSearch);
+      const res = await this.api(url);
+      if (res.ok) this.openDrives = res.data.drives;
     },
-    async exportStudentApplications() {
+
+    async searchDrives() {
+      await this.loadOpenDrives();
+    },
+
+    async applyDrive(id) {
       this.clear();
-      const result = await this.api('/api/student/me/export', { method: 'POST' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      this.message = `Export started: ${result.data.task_id}`;
+      const res = await this.api('/api/drives/' + id + '/apply', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      this.message = res.message;
+      await this.loadOpenDrives();
     },
-    async approveUser(userId) {
+
+    async loadStudentApplications() {
+      const res = await this.api('/api/student/me/applications');
+      if (res.ok) this.studentApplications = res.data.applications;
+    },
+
+    async exportApplications() {
       this.clear();
-      const result = await this.api(`/api/admin/users/${userId}/approve`, { method: 'POST' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
+      const res = await this.api('/api/student/me/export', { method: 'POST' });
+      if (!res.ok) { this.error = res.error; return; }
+      if (res.data && !res.data.queued) {
+        this.message = 'Export completed successfully!';
+      } else {
+        this.message = 'Export started. You will be notified when ready.';
       }
-      await this.loadRoleData();
     },
-    async deactivateUser(userId) {
-      this.clear();
-      const result = await this.api(`/api/admin/users/${userId}/deactivate`, { method: 'POST' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      await this.loadRoleData();
-    },
-    async approveDrive(driveId) {
-      this.clear();
-      const result = await this.api(`/api/admin/drives/${driveId}/approve`, { method: 'POST' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      await this.loadRoleData();
-    },
-    async rejectDrive(driveId) {
-      this.clear();
-      const result = await this.api(`/api/admin/drives/${driveId}/reject`, { method: 'POST' });
-      if (!result.ok) {
-        this.error = result.error;
-        return;
-      }
-      await this.loadRoleData();
-    },
-    clear() {
-      this.message = '';
-      this.error = '';
-    }
   }
 }).mount('#app');

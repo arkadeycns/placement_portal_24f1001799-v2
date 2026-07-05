@@ -54,8 +54,8 @@ def unauthorized_api():
 
 def compute_admin_stats():
     return {
-        "approved_students": User.query.filter_by(role="student", approved=True, is_active=True).count(),
-        "approved_companies": User.query.filter_by(role="company", approved=True, is_active=True).count(),
+        "total_students": User.query.filter_by(role="student").count(),
+        "total_companies": User.query.filter_by(role="company").count(),
         "total_drives": Drive.query.filter(Drive.is_deleted.is_(False)).count(),
         "total_applications": Application.query.count(),
     }
@@ -227,6 +227,30 @@ def serialize_application(application):
         "offer_letter_url": application.offer_letter_url,
         "created_at": application.created_at.isoformat() if application.created_at else None,
     }
+
+
+def serialize_application_detail(application):
+    data = serialize_application(application)
+    student = application.student
+    drive = application.drive
+    if student:
+        data["student_name"] = student.name
+        data["student_department"] = student.department
+        data["student_branch"] = student.branch
+        data["student_cgpa"] = student.cgpa
+        data["student_resume"] = student.resume
+    if drive:
+        data["drive_title"] = drive.title
+        if drive.company:
+            data["company_name"] = drive.company.name
+    return data
+
+
+def serialize_drive_detail(drive):
+    data = serialize_drive(drive)
+    if drive.company:
+        data["company_name"] = drive.company.name
+    return data
 
 
 def validate_student_eligibility(student, drive):
@@ -545,6 +569,26 @@ def api_pending_users():
     return api_response({"users": [serialize_user(user) for user in pending_users]})
 
 
+@app.route("/api/admin/users/all")
+@login_required
+def api_admin_all_users():
+    unauthorized = api_require_role("admin")
+    if unauthorized:
+        return unauthorized
+
+    role_filter = request.args.get("role", "").strip()
+    search = request.args.get("q", "").strip()
+    query = User.query.filter(User.role != "admin")
+
+    if role_filter in {"student", "company"}:
+        query = query.filter(User.role == role_filter)
+    if search:
+        query = query.filter(or_(User.email.ilike(f"%{search}%"), User.full_name.ilike(f"%{search}%")))
+
+    users = query.order_by(User.created_at.desc()).all()
+    return api_response({"users": [serialize_user(user) for user in users]})
+
+
 @app.route("/api/admin/users/<int:user_id>/approve", methods=["POST"])
 @login_required
 def api_approve_user(user_id):
@@ -624,7 +668,7 @@ def api_admin_drives():
     if approval_filter in {"Pending", "Approved", "Rejected"}:
         query = query.filter(Drive.approval_status == approval_filter)
     drives = query.order_by(Drive.created_at.desc()).all()
-    return api_response({"drives": [serialize_drive(drive) for drive in drives]})
+    return api_response({"drives": [serialize_drive_detail(drive) for drive in drives]})
 
 
 @app.route("/api/admin/applications")
@@ -643,7 +687,7 @@ def api_admin_applications():
         query = query.filter(or_(Student.name.ilike(f"%{search}%"), Company.name.ilike(f"%{search}%"), Drive.title.ilike(f"%{search}%")))
 
     applications = query.order_by(Application.created_at.desc()).all()
-    return api_response({"applications": [serialize_application(application) for application in applications]})
+    return api_response({"applications": [serialize_application_detail(application) for application in applications]})
 
 
 @app.route("/api/admin/reports/monthly")
@@ -862,7 +906,7 @@ def api_company_drive_applications(drive_id):
         .order_by(Application.created_at.desc())
         .all()
     )
-    return api_response({"drive": serialize_drive(drive), "applications": [serialize_application(application) for application in applications]})
+    return api_response({"drive": serialize_drive(drive), "applications": [serialize_application_detail(application) for application in applications]})
 
 
 @app.route("/api/applications/<int:application_id>/status", methods=["POST"])
@@ -1032,6 +1076,11 @@ def api_dashboard():
             return api_error("Company profile not found.", 404)
 
         drives = Drive.query.filter_by(company_id=company.id).filter(Drive.is_deleted.is_(False)).order_by(Drive.created_at.desc()).all()
+        drive_data = []
+        for drive in drives:
+            d = serialize_drive(drive)
+            d["applications_count"] = Application.query.filter_by(drive_id=drive.id).count()
+            drive_data.append(d)
         applications_received = (
             Application.query.join(Drive, Application.drive_id == Drive.id)
             .filter(Drive.company_id == company.id)
@@ -1041,7 +1090,7 @@ def api_dashboard():
             "role": "company",
             "company": serialize_company(company),
             "applications_received": applications_received,
-            "drives": [serialize_drive(drive) for drive in drives],
+            "drives": drive_data,
         })
 
     student = get_current_student()
@@ -1067,8 +1116,8 @@ def api_dashboard():
     return api_response({
         "role": "student",
         "student": serialize_student(student),
-        "open_drives": [serialize_drive(drive) for drive in open_drives],
-        "applications": [serialize_application(application) for application in applications],
+        "open_drives": [serialize_drive_detail(drive) for drive in open_drives],
+        "applications": [serialize_application_detail(application) for application in applications],
     })
 
 
@@ -1096,7 +1145,7 @@ def api_drives():
         query = query.filter(or_(Drive.title.ilike(f"%{search}%"), Drive.description.ilike(f"%{search}%"), Drive.eligibility.ilike(f"%{search}%")))
 
     drives = query.order_by(Drive.created_at.desc()).all()
-    return api_response({"drives": [serialize_drive(drive) for drive in drives]})
+    return api_response({"drives": [serialize_drive_detail(drive) for drive in drives]})
 
 
 @app.route("/api/drives/<int:drive_id>")
@@ -1154,7 +1203,7 @@ def api_student_applications():
         .order_by(Application.created_at.desc())
         .all()
     )
-    return api_response({"applications": [serialize_application(application) for application in applications]})
+    return api_response({"applications": [serialize_application_detail(application) for application in applications]})
 
 
 @app.route("/api/student/me/export", methods=["POST"])
@@ -1249,4 +1298,5 @@ with app.app_context():
         db.session.add(admin_user)
         db.session.commit() 
 
-
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)
