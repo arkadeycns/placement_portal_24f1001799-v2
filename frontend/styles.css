@@ -1,0 +1,67 @@
+:root {
+  color-scheme: light;
+  --bg: #f4efe7;
+  --panel: #ffffff;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --accent: #0d6efd;
+  --accent-soft: #dbeafe;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: Arial, Helvetica, sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(13, 110, 253, 0.12), transparent 28%),
+    linear-gradient(180deg, #fffaf3, var(--bg));
+  min-height: 100vh;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: #111827;
+  color: white;
+  border-bottom: 4px solid var(--accent);
+}
+
+.eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.75rem;
+  color: #93c5fd;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  border-radius: 1rem;
+  padding: 1.25rem;
+  box-shadow: 0 10px 30px rgba(17, 24, 39, 0.08);
+}
+
+.panel-soft {
+  background: #f8fafc;
+  border-style: dashed;
+  box-shadow: none;
+}
+
+.list-group-item {
+  border-color: rgba(17, 24, 39, 0.08);
+}
+
+.small-list .card {
+  border-color: rgba(17, 24, 39, 0.08);
+}
