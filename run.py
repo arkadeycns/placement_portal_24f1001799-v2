@@ -5,6 +5,7 @@ from flask_login import LoginManager, login_required, login_user, logout_user, c
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from celery import Celery
+from celery.schedules import crontab
 from dotenv import load_dotenv
 from models import db, User, Company, Student, Drive, Application
 from datetime import datetime, timezone
@@ -39,8 +40,8 @@ celery_app = Celery(
     backend=os.environ.get("CELERY_RESULT_BACKEND", "redis://localhost:6379/0"),
 )
 celery_app.conf.update(timezone="UTC", beat_schedule={
-    "daily-reminders": {"task": "run.send_reminders", "schedule": 86400},
-    "monthly-report":  {"task": "run.monthly_report", "schedule": 86400 * 30},
+    "daily-reminders": {"task": "run.send_reminders", "schedule": crontab(hour=8, minute=0)},
+    "monthly-report":  {"task": "run.monthly_report", "schedule": crontab(day_of_month=1, hour=0, minute=0)},
 })
 
 
@@ -158,11 +159,30 @@ def get_stats():
 
 
 def clear_cache():
-    """Delete cached stats so they refresh on next request."""
+    """Delete cached data so they refresh on next request."""
     try:
         cache.delete("admin_stats")
+        cache.delete("approved_drives")
+        cache.delete("admin_reports")
     except Exception:
         pass
+
+
+def get_approved_drives():
+    """Get approved drives (cached for 120s)."""
+    try:
+        result = cache.get("approved_drives")
+        if result is not None:
+            return result
+    except Exception:
+        pass
+    drives = Drive.query.filter_by(status="Approved").order_by(Drive.created_at.desc()).all()
+    result = [drive_dict(d) for d in drives]
+    try:
+        cache.set("approved_drives", result, timeout=120)
+    except Exception:
+        pass
+    return result
 
 
 # ── Static Files ───────────────────────────────────────────────────────────────
@@ -431,7 +451,61 @@ def api_admin_applications():
     return ok({"applications": [app_dict(a) for a in apps]})
 
 
-# ── Company Routes ─────────────────────────────────────────────────────────────
+@app.route("/api/admin/reports")
+@login_required
+def api_admin_reports():
+    role_err = check_role("admin")
+    if role_err:
+        return role_err
+
+    # Check cache
+    try:
+        cached = cache.get("admin_reports")
+        if cached:
+            return ok(cached)
+    except Exception:
+        pass
+
+    total_drives = Drive.query.count()
+    approved_drives = Drive.query.filter_by(status="Approved").count()
+    pending_drives = Drive.query.filter_by(status="Pending").count()
+    closed_drives = Drive.query.filter_by(status="Closed").count()
+
+    total_apps = Application.query.count()
+    applied = Application.query.filter_by(status="Applied").count()
+    shortlisted = Application.query.filter_by(status="Shortlisted").count()
+    selected = Application.query.filter_by(status="Selected").count()
+    rejected = Application.query.filter_by(status="Rejected").count()
+    placement_rate = round(selected / total_apps * 100, 1) if total_apps else 0
+
+    companies = Company.query.all()
+    company_stats = []
+    for c in companies:
+        c_drives = Drive.query.filter_by(company_id=c.id).count()
+        c_apps = Application.query.join(Drive).filter(Drive.company_id == c.id).count()
+        c_sel = Application.query.join(Drive).filter(
+            Drive.company_id == c.id, Application.status == "Selected").count()
+        company_stats.append({"name": c.name, "drives": c_drives,
+                              "applications": c_apps, "selected": c_sel})
+
+    result = {
+        "drives": {"total": total_drives, "approved": approved_drives,
+                   "pending": pending_drives, "closed": closed_drives},
+        "applications": {"total": total_apps, "applied": applied,
+                         "shortlisted": shortlisted, "selected": selected,
+                         "rejected": rejected},
+        "placement_rate": placement_rate,
+        "company_stats": company_stats,
+    }
+
+    try:
+        cache.set("admin_reports", result, timeout=60)
+    except Exception:
+        pass
+    return ok(result)
+
+
+# ── Company Routes ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/company/profile", methods=["GET", "PUT"])
 @login_required
@@ -674,10 +748,9 @@ def api_dashboard():
     student = Student.query.filter_by(user_id=current_user.id).first()
     if not student:
         return err("Student not found", 404)
-    open_drives = Drive.query.filter_by(status="Approved").order_by(Drive.created_at.desc()).all()
     apps = Application.query.filter_by(student_id=student.id).order_by(Application.applied_at.desc()).all()
     return ok({"role": "student", "student": student_dict(student),
-               "open_drives": [drive_dict(d) for d in open_drives],
+               "open_drives": get_approved_drives(),
                "applications": [app_dict(a) for a in apps]})
 
 
@@ -694,11 +767,32 @@ def api_drives():
 
     search = request.args.get("q", "")
     status = request.args.get("status", "")
+    branch = request.args.get("branch", "")
+    cgpa = request.args.get("cgpa", "")
+    year = request.args.get("year", "")
+
     if status in ("Pending", "Approved", "Closed"):
         query = query.filter(Drive.status == status)
     if search:
         query = query.filter(or_(Drive.title.ilike(f"%{search}%"),
                                  Drive.description.ilike(f"%{search}%")))
+    if branch:
+        query = query.filter(or_(Drive.eligibility_branch.is_(None),
+                                 Drive.eligibility_branch.ilike(f"%{branch}%")))
+    if cgpa:
+        try:
+            cgpa_val = float(cgpa)
+            query = query.filter(or_(Drive.eligibility_cgpa.is_(None),
+                                     Drive.eligibility_cgpa <= cgpa_val))
+        except ValueError:
+            pass
+    if year:
+        try:
+            year_val = int(year)
+            query = query.filter(or_(Drive.eligibility_year.is_(None),
+                                     Drive.eligibility_year == year_val))
+        except ValueError:
+            pass
 
     drives = query.order_by(Drive.created_at.desc()).all()
     return ok({"drives": [drive_dict(d) for d in drives]})
@@ -779,16 +873,20 @@ def api_search():
 
 # ── Email Helper ───────────────────────────────────────────────────────────────
 
-def send_mail(subject, body, recipient):
+def send_mail(subject, body, recipient, html=False):
     """Send an email. Returns False if mail is not configured."""
     server = os.environ.get("MAIL_SERVER", "")
     if not server or not recipient:
+        print(f"[MAIL] Skipped: server={'(empty)' if not server else server}, recipient={recipient}")
         return False
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = os.environ.get("MAIL_USERNAME", "admin@institute.edu")
     msg["To"] = recipient
-    msg.set_content(body)
+    if html:
+        msg.set_content(body, subtype='html')
+    else:
+        msg.set_content(body)
     try:
         with smtplib.SMTP(server, int(os.environ.get("MAIL_PORT", 587))) as s:
             s.starttls()
@@ -796,8 +894,10 @@ def send_mail(subject, body, recipient):
             if username:
                 s.login(username, os.environ.get("MAIL_PASSWORD", ""))
             s.send_message(msg)
+        print(f"[MAIL] ✅ Sent '{subject}' to {recipient}")
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[MAIL] ❌ Failed to send '{subject}' to {recipient}: {e}")
         return False
 
 
@@ -830,14 +930,28 @@ def monthly_report():
         selected = Application.query.filter(
             Application.applied_at >= month_start, Application.status == "Selected").count()
 
-        report = (f"<html><body>"
-                  f"<h2>Monthly Placement Report</h2>"
-                  f"<p>Drives conducted: {drives}</p>"
-                  f"<p>Students applied: {applied}</p>"
-                  f"<p>Students selected: {selected}</p>"
-                  f"</body></html>")
+        rate = round(selected / applied * 100, 1) if applied else 0
+        report = (
+            "<html><head><style>"
+            "body{font-family:Arial,sans-serif;margin:40px;color:#333}"
+            "h2{color:#2c3e50;border-bottom:2px solid #3498db;padding-bottom:10px}"
+            "table{border-collapse:collapse;width:100%;margin-top:20px}"
+            "th,td{border:1px solid #ddd;padding:12px;text-align:left}"
+            "th{background:#3498db;color:#fff}"
+            "</style></head><body>"
+            "<h2>Monthly Placement Activity Report</h2>"
+            f"<p><strong>Report Period:</strong> {month_start.strftime('%B %Y')}</p>"
+            "<table><tr><th>Metric</th><th>Count</th></tr>"
+            f"<tr><td>Drives Conducted</td><td>{drives}</td></tr>"
+            f"<tr><td>Students Applied</td><td>{applied}</td></tr>"
+            f"<tr><td>Students Selected</td><td>{selected}</td></tr>"
+            f"<tr><td>Selection Rate</td><td>{rate}%</td></tr>"
+            "</table>"
+            "<p style='margin-top:20px;color:#666;font-size:12px'>"
+            "Auto-generated by Placement Portal</p>"
+            "</body></html>")
         send_mail("Monthly Placement Report", report,
-                  os.environ.get("ADMIN_EMAIL", "admin@institute.edu"))
+                  os.environ.get("ADMIN_EMAIL", "admin@institute.edu"), html=True)
         return {"drives": drives, "applied": applied, "selected": selected}
 
 
@@ -865,6 +979,57 @@ def export_csv_task(student_id):
         return {"ok": True, "path": path}
 
 
+# ── Admin Task Trigger Routes ─────────────────────────────────────────────────
+
+@app.route("/api/admin/trigger/monthly-report", methods=["POST"])
+@login_required
+def api_trigger_monthly_report():
+    """Admin can manually trigger the monthly report task."""
+    role_err = check_role("admin")
+    if role_err:
+        return role_err
+    try:
+        result = monthly_report.delay()
+        return ok({"queued": True, "task_id": result.id}, "Monthly report task queued via Celery")
+    except Exception:
+        res = monthly_report()
+        return ok({"queued": False, "result": res}, "Monthly report executed (sync fallback)")
+
+
+@app.route("/api/admin/trigger/reminders", methods=["POST"])
+@login_required
+def api_trigger_reminders():
+    """Admin can manually trigger the daily reminders task."""
+    role_err = check_role("admin")
+    if role_err:
+        return role_err
+    try:
+        result = send_reminders.delay()
+        return ok({"queued": True, "task_id": result.id}, "Reminders task queued via Celery")
+    except Exception:
+        res = send_reminders()
+        return ok({"queued": False, "result": res}, "Reminders executed (sync fallback)")
+
+
+@app.route("/api/admin/mail-status")
+@login_required
+def api_mail_status():
+    """Check if mail is configured properly."""
+    role_err = check_role("admin")
+    if role_err:
+        return role_err
+    server = os.environ.get("MAIL_SERVER", "")
+    username = os.environ.get("MAIL_USERNAME", "")
+    admin_email = os.environ.get("ADMIN_EMAIL", "")
+    configured = bool(server and username)
+    return ok({
+        "configured": configured,
+        "server": server or "(not set)",
+        "username": username or "(not set)",
+        "admin_email": admin_email or "(not set)",
+    })
+
+
 # ── Celery Trigger Routes ─────────────────────────────────────────────────────
 
 @app.route("/api/student/export", methods=["POST"])
@@ -878,38 +1043,37 @@ def api_student_export():
         return err("Student not found", 404)
     try:
         result = export_csv_task.delay(student.id)
-        return ok({"task_id": result.id, "queued": True}, "Export started", 202)
+        return ok({"task_id": result.id, "queued": True,
+                   "download_url": "/api/student/export/download"}, "Export started", 202)
     except Exception:
         res = export_csv_task(student.id)
-        return ok({"queued": False, "result": res}, "Export completed")
+        return ok({"queued": False, "result": res,
+                   "download_url": "/api/student/export/download"}, "Export completed")
 
 
-@app.route("/api/admin/report", methods=["POST"])
+@app.route("/api/student/export/download")
 @login_required
-def api_trigger_report():
-    role_err = check_role("admin")
+def api_student_export_download():
+    role_err = check_role("student")
     if role_err:
         return role_err
-    try:
-        monthly_report.delay()
-        return ok(msg="Report queued", status=202)
-    except Exception:
-        res = monthly_report()
-        return ok(res, "Report generated")
+    student = Student.query.filter_by(user_id=current_user.id).first()
+    if not student:
+        return err("Student not found", 404)
+
+    export_dir = app.instance_path
+    files = sorted([f for f in os.listdir(export_dir)
+                    if f.startswith(f"export_{student.id}_") and f.endswith(".csv")])
+    if not files:
+        return err("No export found. Please trigger an export first.", 404)
+
+    latest = files[-1]
+    return send_from_directory(export_dir, latest, as_attachment=True,
+                               download_name="placement_applications.csv")
 
 
-@app.route("/api/admin/reminders", methods=["POST"])
-@login_required
-def api_trigger_reminders():
-    role_err = check_role("admin")
-    if role_err:
-        return role_err
-    try:
-        send_reminders.delay()
-        return ok(msg="Reminders queued", status=202)
-    except Exception:
-        res = send_reminders()
-        return ok(res, "Reminders sent")
+
+
 
 
 # ── Startup ────────────────────────────────────────────────────────────────────

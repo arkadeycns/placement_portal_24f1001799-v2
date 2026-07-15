@@ -120,6 +120,65 @@
             <div class="col-md-3"><div class="card text-center p-3"><h3 class="text-primary mb-1">{{ adminStats.total_drives || 0 }}</h3><p class="text-muted mb-0">Drives</p></div></div>
             <div class="col-md-3"><div class="card text-center p-3"><h3 class="text-primary mb-1">{{ adminStats.total_applications || 0 }}</h3><p class="text-muted mb-0">Applications</p></div></div>
           </div>
+          <!-- Placement Statistics -->
+          <div v-if="adminReports" class="mt-4">
+            <h4 class="mb-3">Placement Statistics</h4>
+            <div class="row g-3 mb-4">
+              <div class="col-md-3"><div class="card text-center p-3 border-success"><h4 class="text-success mb-1">{{ adminReports.placement_rate || 0 }}%</h4><p class="text-muted mb-0">Placement Rate</p></div></div>
+              <div class="col-md-3"><div class="card text-center p-3"><h4 class="text-info mb-1">{{ adminReports.applications ? adminReports.applications.applied : 0 }}</h4><p class="text-muted mb-0">Applied</p></div></div>
+              <div class="col-md-3"><div class="card text-center p-3"><h4 class="text-warning mb-1">{{ adminReports.applications ? adminReports.applications.shortlisted : 0 }}</h4><p class="text-muted mb-0">Shortlisted</p></div></div>
+              <div class="col-md-3"><div class="card text-center p-3"><h4 class="text-success mb-1">{{ adminReports.applications ? adminReports.applications.selected : 0 }}</h4><p class="text-muted mb-0">Selected</p></div></div>
+            </div>
+            <h5 class="mb-3">Company-wise Breakdown</h5>
+            <div class="table-responsive"><table class="table table-hover">
+              <thead class="table-light"><tr><th>Company</th><th>Drives</th><th>Applications</th><th>Selected</th></tr></thead>
+              <tbody>
+                <tr v-for="c in adminReports.company_stats" :key="c.name">
+                  <td>{{ c.name }}</td><td>{{ c.drives }}</td><td>{{ c.applications }}</td><td>{{ c.selected }}</td>
+                </tr>
+                <tr v-if="!adminReports.company_stats || !adminReports.company_stats.length"><td colspan="4" class="text-center text-muted">No company data.</td></tr>
+              </tbody>
+            </table></div>
+          </div>
+          <!-- Background Tasks & Email -->
+          <div class="mt-4">
+            <h4 class="mb-3">Background Tasks & Email</h4>
+            <div class="card p-3 mb-3">
+              <h6 class="mb-2">Mail Configuration Status</h6>
+              <div v-if="mailStatus">
+                <span v-if="mailStatus.configured" class="badge bg-success me-2">✅ Configured</span>
+                <span v-else class="badge bg-danger me-2">❌ Not Configured</span>
+                <small class="text-muted">Server: {{ mailStatus.server }} | From: {{ mailStatus.username }} | Admin: {{ mailStatus.admin_email }}</small>
+              </div>
+              <div v-else class="text-muted"><small>Loading mail status...</small></div>
+            </div>
+            <div class="row g-3">
+              <div class="col-md-6">
+                <div class="card p-3 h-100">
+                  <h6>Monthly Placement Report</h6>
+                  <p class="text-muted small mb-2">Sends an HTML report email to the admin with this month's placement stats.</p>
+                  <button class="btn btn-primary btn-sm" @click="triggerMonthlyReport" :disabled="taskRunning">Send Monthly Report Now</button>
+                  <div v-if="monthlyReportResult" class="mt-2">
+                    <div class="alert alert-sm py-1 px-2 mb-0" :class="monthlyReportResult.ok ? 'alert-success' : 'alert-info'">
+                      <small>{{ monthlyReportResult.message }}</small>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="card p-3 h-100">
+                  <h6>Daily Student Reminders</h6>
+                  <p class="text-muted small mb-2">Emails all approved students about upcoming drive deadlines.</p>
+                  <button class="btn btn-primary btn-sm" @click="triggerReminders" :disabled="taskRunning">Send Reminders Now</button>
+                  <div v-if="remindersResult" class="mt-2">
+                    <div class="alert alert-sm py-1 px-2 mb-0" :class="remindersResult.ok ? 'alert-success' : 'alert-info'">
+                      <small>{{ remindersResult.message }}</small>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- Admin Users -->
@@ -320,8 +379,11 @@
         <div v-if="currentPage === 'drives'">
           <h2 class="mb-4">Browse Placement Drives</h2>
           <div class="row g-2 mb-3">
-            <div class="col-md-6"><input v-model="driveSearch" class="form-control" placeholder="Search drives..." @keyup.enter="loadOpenDrives" /></div>
-            <div class="col-md-2"><button class="btn btn-primary w-100" @click="loadOpenDrives">Search</button></div>
+            <div class="col-md-4"><input v-model="driveSearch" class="form-control" placeholder="Search drives..." @keyup.enter="loadOpenDrives" /></div>
+            <div class="col-md-2"><input v-model="eligibilityFilter.branch" class="form-control" placeholder="Branch" /></div>
+            <div class="col-md-2"><input v-model="eligibilityFilter.cgpa" class="form-control" placeholder="My CGPA" /></div>
+            <div class="col-md-2"><input v-model="eligibilityFilter.year" class="form-control" placeholder="Grad Year" /></div>
+            <div class="col-md-2"><button class="btn btn-primary w-100" @click="loadOpenDrives">Filter</button></div>
           </div>
           <div class="row g-3">
             <div class="col-md-6 col-lg-4" v-for="d in openDrives" :key="d.id">
@@ -351,7 +413,8 @@
         <!-- Student Applications -->
         <div v-if="currentPage === 'applications'">
           <h2 class="mb-4">My Applications</h2>
-          <button class="btn btn-outline-primary btn-sm mb-3" @click="exportApplications">Export as CSV</button>
+          <button class="btn btn-outline-primary btn-sm mb-3 me-2" @click="exportApplications">Export as CSV</button>
+          <a v-if="exportReady" href="/api/student/export/download" class="btn btn-success btn-sm mb-3" download>Download CSV</a>
           <div class="table-responsive"><table class="table table-hover">
             <thead class="table-light"><tr><th>#</th><th>Drive</th><th>Company</th><th>Status</th><th>Applied</th><th>Interview</th></tr></thead>
             <tbody>

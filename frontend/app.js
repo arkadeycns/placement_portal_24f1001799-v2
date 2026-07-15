@@ -15,6 +15,7 @@ createApp({
 
       // Admin
       adminStats: {},
+      adminReports: null,
       allUsers: [],
       userSearch: '',
       userRoleFilter: '',
@@ -22,6 +23,10 @@ createApp({
       driveStatusFilter: '',
       adminApplications: [],
       appStatusFilter: '',
+      mailStatus: null,
+      taskRunning: false,
+      monthlyReportResult: null,
+      remindersResult: null,
 
       // Company
       companyProfile: { name: '', hr_contact: '', website: '', industry: '' },
@@ -34,7 +39,9 @@ createApp({
       studentProfile: { name: '', department: '', branch: '', phone: '', cgpa: '', graduation_year: '' },
       openDrives: [],
       driveSearch: '',
+      eligibilityFilter: { branch: '', cgpa: '', year: '' },
       studentApplications: [],
+      exportReady: false,
     };
   },
   mounted() { this.checkLogin(); },
@@ -52,9 +59,11 @@ createApp({
     clear() { this.message = ''; this.error = ''; },
     formatDate(iso) { return iso ? new Date(iso).toLocaleDateString() : '-'; },
     badge(status) {
-      const m = { Applied: 'badge bg-primary', Shortlisted: 'badge bg-warning text-dark',
-                  Selected: 'badge bg-success', Rejected: 'badge bg-danger',
-                  Pending: 'badge bg-secondary', Approved: 'badge bg-success', Closed: 'badge bg-danger' };
+      const m = {
+        Applied: 'badge bg-primary', Shortlisted: 'badge bg-warning text-dark',
+        Selected: 'badge bg-success', Rejected: 'badge bg-danger',
+        Pending: 'badge bg-secondary', Approved: 'badge bg-success', Closed: 'badge bg-danger'
+      };
       return m[status] || 'badge bg-secondary';
     },
     goTo(page) { this.clear(); this.currentPage = page; this.loadPage(page); },
@@ -116,6 +125,40 @@ createApp({
     async loadAdminDashboard() {
       const res = await this.api('/api/admin/summary');
       if (res.ok) this.adminStats = res.data.stats;
+      await this.loadAdminReports();
+      await this.loadMailStatus();
+    },
+    async loadAdminReports() {
+      const res = await this.api('/api/admin/reports');
+      if (res.ok) this.adminReports = res.data;
+    },
+    async loadMailStatus() {
+      const res = await this.api('/api/admin/mail-status');
+      if (res.ok) this.mailStatus = res.data;
+    },
+    async triggerMonthlyReport() {
+      this.clear();
+      this.taskRunning = true;
+      this.monthlyReportResult = null;
+      const res = await this.api('/api/admin/trigger/monthly-report', { method: 'POST' });
+      this.taskRunning = false;
+      if (res.ok) {
+        this.monthlyReportResult = { ok: true, message: res.message + (res.data.queued ? ' (via Celery)' : ' (sync)') };
+      } else {
+        this.monthlyReportResult = { ok: false, message: res.error || 'Failed' };
+      }
+    },
+    async triggerReminders() {
+      this.clear();
+      this.taskRunning = true;
+      this.remindersResult = null;
+      const res = await this.api('/api/admin/trigger/reminders', { method: 'POST' });
+      this.taskRunning = false;
+      if (res.ok) {
+        this.remindersResult = { ok: true, message: res.message + (res.data.queued ? ' (via Celery)' : ' (sync)') };
+      } else {
+        this.remindersResult = { ok: false, message: res.error || 'Failed' };
+      }
     },
     async loadAllUsers() {
       let url = '/api/admin/users?';
@@ -245,7 +288,10 @@ createApp({
     },
     async loadOpenDrives() {
       let url = '/api/drives?';
-      if (this.driveSearch) url += 'q=' + encodeURIComponent(this.driveSearch);
+      if (this.driveSearch) url += 'q=' + encodeURIComponent(this.driveSearch) + '&';
+      if (this.eligibilityFilter.branch) url += 'branch=' + encodeURIComponent(this.eligibilityFilter.branch) + '&';
+      if (this.eligibilityFilter.cgpa) url += 'cgpa=' + encodeURIComponent(this.eligibilityFilter.cgpa) + '&';
+      if (this.eligibilityFilter.year) url += 'year=' + encodeURIComponent(this.eligibilityFilter.year) + '&';
       const res = await this.api(url);
       if (res.ok) this.openDrives = res.data.drives;
     },
@@ -263,7 +309,13 @@ createApp({
       this.clear();
       const res = await this.api('/api/student/export', { method: 'POST' });
       if (!res.ok) { this.error = res.error; return; }
-      this.message = res.data && !res.data.queued ? 'Export completed!' : 'Export started. You will be notified.';
+      if (res.data && !res.data.queued) {
+        this.message = 'Export completed! Click Download CSV to save.';
+        this.exportReady = true;
+      } else {
+        this.message = 'Export started. Download will be ready shortly.';
+        setTimeout(() => { this.exportReady = true; }, 3000);
+      }
     },
   }
 }).mount('#app');
